@@ -36,6 +36,8 @@ class AudioClassifier(nn.Module):
         hidden_states = self.wav2vec2(input_features).last_hidden_state
         pooled_output = torch.mean(hidden_states, dim=1)
 
+        # print("hidden: ", hidden_states.shape, pooled_output.shape)  768
+
         speaker_logits = self.speaker_classifier(pooled_output)
         label_logits = self.label_classifier(pooled_output)
 
