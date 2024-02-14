@@ -1,112 +1,130 @@
+import os.path
+
 import torch
 import torch.nn as nn
+import torchaudio
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
 from transformers import Wav2Vec2Model, Wav2Vec2Processor, AdamW
 import numpy as np
 
-# Define constants
-NUM_SPEAKERS = 50
+from audio_dataset import AudioDataset
+from data_process import data_preparation
+from model import AudioClassifier
+
+
 NUM_CLASSES = 2
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.manual_seed(42)
 
 
-# Define the model architecture
-class AudioClassifier(nn.Module):
-    def __init__(self):
-        super(AudioClassifier, self).__init__()
-        self.processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
-        self.wav2vec2 = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base-960h")
-        self.speaker_classifier = nn.Sequential(
-            nn.Linear(768, 512),
-            nn.ReLU(),
-            nn.Linear(512, NUM_SPEAKERS)
-        )
-
-        self.label_classifier = nn.Sequential(
-            nn.Linear(768, 512),
-            nn.ReLU(),
-            nn.Linear(512, NUM_CLASSES)
-        )
-
-    def forward(self, input_ids, attention_mask):
-        hidden_states = self.wav2vec2(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
-        pooled_output = torch.mean(hidden_states, dim=1)
-
-        speaker_logits = self.speaker_classifier(pooled_output)
-        label_logits = self.label_classifier(pooled_output)
-
-        return speaker_logits, label_logits
-
-
-# Define custom dataset class
-class AudioDataset(Dataset):
-    def __init__(self, data, labels):
-        self.data = data
-        self.labels = labels
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        audio_data = self.data[idx]
-        label = self.labels[idx]
-        return audio_data, label
-
-# Example data loading and preprocessing function
-def load_data():
-    # Load and preprocess audio data (e.g., convert to spectrograms)
-    # Return preprocessed data and labels
-    pass
-
-# Example training loop
+# Training loop
 def train(model, train_loader, criterion, optimizer, num_epochs=10):
-    model.train()
-    for epoch in range(num_epochs):
+    for epoch in tqdm(range(num_epochs)):
+        model.train()
         running_loss = 0.0
-        for inputs, labels in train_loader:
-            inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
+        correct_speaker = 0
+        correct_label = 0
+        total_samples = 0
+        for i, batch in enumerate(train_loader):
+
+            waveforms = batch['audio'].to(DEVICE)
+            speakers = torch.from_numpy(np.array(batch['speaker']))
+            labels = torch.from_numpy(np.array(batch['label']))
+
+            # print(waveforms.squeeze(1).input_values.shape)
+
             optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
+
+            # loss
+            speaker_logits, label_logits = model(waveforms)
+            loss_speaker = criterion(speaker_logits, speakers)
+            loss_label = criterion(label_logits, labels)
+            total_loss = loss_speaker + loss_label
+            running_loss += total_loss.item()
+
+            # accuracy
+            _, predicted_speakers = torch.max(speaker_logits, 1)
+            _, predicted_labels = torch.max(label_logits, 1)
+            total_samples += speakers.size(0)
+            correct_speaker += (predicted_speakers == speakers).sum().item()
+            correct_label += (predicted_labels == labels).sum().item()
+
+            total_loss.backward()
             optimizer.step()
-            running_loss += loss.item()
-        print(f"Epoch {epoch+1}/{num_epochs}, Loss: {running_loss/len(train_loader)}")
+
+        print(f"Epoch {epoch + 1}/{num_epochs}, Training Loss: {running_loss}")
+        accuracy_speaker = correct_speaker / total_samples
+        accuracy_label = correct_label / total_samples
+        print(f"Training Accuracy - Speaker: {accuracy_speaker}, Label: {accuracy_label}")
+
 
 # Example evaluation function
-def evaluate(model, val_loader):
+def evaluate(model, val_loader, model_save_path_):
     model.eval()
-    correct = 0
-    total = 0
+    correct_speaker = 0
+    correct_label = 0
+    total_samples = 0
+    running_loss = 0.0
     with torch.no_grad():
-        for inputs, labels in val_loader:
-            inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
-            outputs = model(inputs)
-            _, predicted = torch.max(outputs, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-    accuracy = correct / total
-    print(f"Accuracy: {accuracy}")
+        for i, batch in enumerate(val_loader):
+            waveforms = batch['audio'].to(DEVICE)
+            speakers = torch.from_numpy(np.array(batch['speaker']))
+            labels = torch.from_numpy(np.array(batch['label']))
+
+            speaker_logits, label_logits = model(waveforms)
+            loss_speaker = criterion(speaker_logits, speakers)
+            loss_label = criterion(label_logits, labels)
+            running_loss = loss_speaker.item() + loss_label.item()
+
+            _, predicted_speakers = torch.max(speaker_logits, 1)
+            _, predicted_labels = torch.max(label_logits, 1)
+
+            total_samples += speakers.size(0)
+            correct_speaker += (predicted_speakers == speakers).sum().item()
+            correct_label += (predicted_labels == labels).sum().item()
+
+    print(f"Test Loss: {running_loss}")
+    accuracy_speaker = correct_speaker / total_samples
+    accuracy_label = correct_label / total_samples
+    print(f"Test Accuracy - Speaker: {accuracy_speaker}, Label: {accuracy_label}")
+    torch.save(model.state_dict(), os.path.join(model_save_path_, "model.pth"))
+
 
 # Example usage
 if __name__ == "__main__":
-    # Load data
-    train_data, train_labels = load_data()  # Load training data
-    val_data, val_labels = load_data()      # Load validation data
 
+    csv_path = 'C:\\Users\\gtc\\Desktop\\AudioDeepFakeDetectionAndSpeakerIdentification\\dataset\\meta.csv'
+    root_dir = 'C:\\Users\\gtc\\Desktop\\AudioDeepFakeDetectionAndSpeakerIdentification\\dataset'
+    model_save_path = "C:\\Users\\gtc\\Desktop\\AudioDeepFakeDetectionAndSpeakerIdentification"
+    processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
+
+    train_data_df, val_data_df, num_speakers, max_length, name_to_number_map = data_preparation(csv_path, root_dir)
+
+    print("The max length of audio is: ", max_length)
+
+    max_audio_length = 5000  # 200000
     # Create datasets and dataloaders
-    train_dataset = AudioDataset(train_data, train_labels)
-    val_dataset = AudioDataset(val_data, val_labels)
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+    train_dataset = AudioDataset(train_data_df, root_dir, processor, max_audio_length)
+    val_dataset = AudioDataset(val_data_df, root_dir, processor, max_audio_length)
+
+    # for i in range(5):
+    #     sample = train_dataset[i]
+    #     print(i, sample[0].input_values.shape, sample[1][0], sample[1][1])
+    # exit(0)
+
+    batch_size = 4  # 32
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
 
     # Initialize model, criterion, and optimizer
-    model = AudioClassifier().to(DEVICE)
+    model = AudioClassifier(num_speakers, 2).to(DEVICE)
     criterion = nn.CrossEntropyLoss()
-    optimizer = AdamW(model.parameters(), lr=1e-4)
+    optimizer = AdamW(model.parameters(), lr=1e-5)
 
     # Train the model
     train(model, train_loader, criterion, optimizer, num_epochs=10)
 
     # Evaluate the model
-    evaluate(model, val_loader)
+    evaluate(model, val_loader, model_save_path)
