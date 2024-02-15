@@ -24,10 +24,11 @@ class AudioClassifier(nn.Module):
 
         self.label_classifier = nn.Sequential(
             nn.Dropout(0.4),
-            nn.Linear(768, 512),
+            nn.Linear(768, 256),
             nn.Tanh(),
             nn.Dropout(0.4),
-            nn.Linear(512, num_classes)
+            nn.Linear(256, num_classes),
+            nn.Sigmoid()
         )
 
     def forward(self, input_features):
